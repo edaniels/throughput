@@ -13,13 +13,18 @@ import (
 
 type Stats struct {
 	bytesReadPerSecond float64
+	reads              uint64
+	writes             uint64
 	writesPerSecond    float64
 	percentageComplete float64
 }
 
 func (s Stats) String() string {
-	return fmt.Sprintf("stats: %f MiB/s %f writes/s %f%%",
+	return fmt.Sprintf("stats: %f MiB/s %d reads %d writes %d missing %f writes/s %f%%",
 		s.bytesReadPerSecond/1024.0/1024.0,
+		s.reads,
+		s.writes,
+		s.writes-s.reads,
 		s.writesPerSecond,
 		s.percentageComplete,
 	)
@@ -55,7 +60,7 @@ func TestPacketThroughput(t *testing.T, makeReaderWriterPair func(t *testing.T) 
 			// spew.Dump(writer)
 
 			done := make(chan struct{})
-			var copied, totalWrites int64
+			var copied, totalReads, totalWrites int64
 			ticker := time.NewTicker(time.Second * 1)
 			started := time.Now()
 			var writesDone bool
@@ -65,6 +70,8 @@ func TestPacketThroughput(t *testing.T, makeReaderWriterPair func(t *testing.T) 
 				s := Stats{
 					bytesReadPerSecond: float64(atomic.LoadInt64(&copied)) / time.Since(started).Seconds(),
 					percentageComplete: float64(atomic.LoadInt64(&copied)) / float64(waitForBytes) * 100.0,
+					reads:              uint64(atomic.LoadInt64(&totalReads)),
+					writes:             uint64(atomic.LoadInt64(&totalWrites)),
 				}
 				if writesDone {
 					s.writesPerSecond = float64(atomic.LoadInt64(&totalWrites)) / writesFinishedAt.Sub(started).Seconds()
@@ -92,15 +99,17 @@ func TestPacketThroughput(t *testing.T, makeReaderWriterPair func(t *testing.T) 
 				for {
 					n, err := reader.Read(buf[:])
 					if err != nil {
-						if errors.Is(err, io.EOF) {
+						if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
 							println("EOF")
 							return
 						}
 						panic(err)
 					}
 					nowCopied := atomic.AddInt64(&copied, int64(n))
+					atomic.StoreInt64(&totalReads, copied/size)
 					if nowCopied == waitForBytes {
 						close(done)
+						return
 					}
 				}
 			}()
