@@ -23,15 +23,3 @@ require (
 	golang.org/x/sys v0.16.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/pion/sctp => /Users/eric/sctp
-
-replace github.com/pion/dtls/v2 => /Users/eric/dtls
-
-replace github.com/pion/webrtc/v3 => /Users/eric/webrtc
-
-replace github.com/pion/ice/v2 => /Users/eric/ice
-
-replace github.com/pion/logging => /Users/eric/logging
-
-replace github.com/pion/transport/v2 => /Users/eric/transport
