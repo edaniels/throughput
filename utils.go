@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/pion/sctp"
 )
 
 type Stats struct {
@@ -20,7 +22,7 @@ type Stats struct {
 }
 
 func (s Stats) String() string {
-	return fmt.Sprintf("stats: %f MiB/s %d reads %d writes %d missing %f writes/s %f%%",
+	return fmt.Sprintf("stats: MiB/s=%f reads=%d writes=%d missing=%d writes/s=%f pct_done=%f%%",
 		s.bytesReadPerSecond/1024.0/1024.0,
 		s.reads,
 		s.writes,
@@ -151,15 +153,35 @@ func (w PairedUDPWriter) Close() error {
 	return w.Conn.Close()
 }
 
-type ReadCloserWrapper struct {
-	Conn      net.Conn
+type SCTPStreamConnWrapper struct {
+	*sctp.Stream
+}
+
+func (s SCTPStreamConnWrapper) LocalAddr() net.Addr {
+	return nil
+}
+
+func (s SCTPStreamConnWrapper) RemoteAddr() net.Addr {
+	return nil
+}
+
+func (s SCTPStreamConnWrapper) SetDeadline(time.Time) error {
+	return nil
+}
+
+func (s SCTPStreamConnWrapper) SetReadDeadline(time.Time) error {
+	return nil
+}
+
+func (s SCTPStreamConnWrapper) SetWriteDeadline(time.Time) error {
+	return nil
+}
+
+type ConnCloserWrapper struct {
+	net.Conn
 	CloseFunc func() error
 }
 
-func (r ReadCloserWrapper) Read(b []byte) (n int, err error) {
-	return r.Conn.Read(b)
-}
-
-func (r ReadCloserWrapper) Close() error {
-	return errors.Join(r.Conn.Close(), r.CloseFunc())
+func (c ConnCloserWrapper) Close() error {
+	return errors.Join(c.Conn.Close(), c.CloseFunc())
 }
