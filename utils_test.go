@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pion/datachannel"
 	"github.com/pion/dtls/v2"
 	"github.com/pion/dtls/v2/pkg/crypto/selfsign"
 	"github.com/pion/ice/v2"
@@ -121,7 +122,9 @@ func TestThroughputICE(t *testing.T) {
 //	}
 func TestThroughputSCTPUnordered(t *testing.T) {
 	TestPacketThroughput(t, func(t *testing.T) (io.ReadCloser, io.WriteCloser, error) {
-		return pipeSCTP(t, pipeUDP)
+		return pipeSCTPWithOpts(t, pipeUDP, func(writer *sctp.Stream) {
+			writer.SetReliabilityParams(true, sctp.ReliabilityTypeReliable, 0)
+		})
 	})
 }
 
@@ -151,7 +154,9 @@ func TestThroughputSCTPOrdered(t *testing.T) {
 //	}
 func TestThroughputSCTPUnorderedOnDTLS(t *testing.T) {
 	TestPacketThroughput(t, func(t *testing.T) (io.ReadCloser, io.WriteCloser, error) {
-		return pipeSCTP(t, pipeDTLS)
+		return pipeSCTPWithOpts(t, pipeDTLS, func(writer *sctp.Stream) {
+			writer.SetReliabilityParams(true, sctp.ReliabilityTypeReliable, 0)
+		})
 	})
 }
 
@@ -164,7 +169,9 @@ func TestThroughputSCTPUnorderedOnDTLS(t *testing.T) {
 //	}
 func TestThroughputSCTPUnorderedOnICE(t *testing.T) {
 	TestPacketThroughput(t, func(t *testing.T) (io.ReadCloser, io.WriteCloser, error) {
-		return pipeSCTP(t, pipeICE)
+		return pipeSCTPWithOpts(t, pipeICE, func(writer *sctp.Stream) {
+			writer.SetReliabilityParams(true, sctp.ReliabilityTypeReliable, 0)
+		})
 	})
 }
 
@@ -179,7 +186,23 @@ func TestThroughputSCTPUnorderedOnICE(t *testing.T) {
 // maybe a little bit slower because ICE has its own layer of buffering?
 func TestThroughputSCTPUnorderedOnDTLSOnICE(t *testing.T) {
 	TestPacketThroughput(t, func(t *testing.T) (io.ReadCloser, io.WriteCloser, error) {
-		return pipeSCTP(t, func(t *testing.T) (net.Conn, net.Conn, error) {
+		return pipeSCTPWithOpts(t, func(t *testing.T) (net.Conn, net.Conn, error) {
+			reader, writer, err := pipeICE(t)
+			if err != nil {
+				return nil, nil, err
+			}
+			return pipeDTLSConn(t, func(t *testing.T) (net.Conn, net.Conn, error) {
+				return reader, writer, nil
+			})
+		}, func(writer *sctp.Stream) {
+			writer.SetReliabilityParams(true, sctp.ReliabilityTypeReliable, 0)
+		})
+	})
+}
+
+func TestThroughputDataChannelUnordered(t *testing.T) {
+	TestPacketThroughput(t, func(t *testing.T) (io.ReadCloser, io.WriteCloser, error) {
+		return pipeDataChannel(t, func(t *testing.T) (net.Conn, net.Conn, error) {
 			reader, writer, err := pipeICE(t)
 			if err != nil {
 				return nil, nil, err
@@ -191,8 +214,16 @@ func TestThroughputSCTPUnorderedOnDTLSOnICE(t *testing.T) {
 	})
 }
 
+func TestThroughputDataChannelNoDTLSUnordered(t *testing.T) {
+	TestPacketThroughput(t, func(t *testing.T) (io.ReadCloser, io.WriteCloser, error) {
+		return pipeDataChannel(t, func(t *testing.T) (net.Conn, net.Conn, error) {
+			return pipeICE(t)
+		})
+	})
+}
+
 // todo(erd): ordered/unordered + other params
-func TestThroughputDataChannel(t *testing.T) {
+func TestThroughputWebRTCDataChannel(t *testing.T) {
 	TestPacketThroughput(t, func(t *testing.T) (io.ReadCloser, io.WriteCloser, error) {
 		writerPC, readerPC, err := newPair()
 		if err != nil {
@@ -237,9 +268,17 @@ type DataChannelIOWrapper struct {
 
 func NewDataChannelIOWrapper(dc *webrtc.DataChannel) *DataChannelIOWrapper {
 	wrapper := DataChannelIOWrapper{dc: dc}
+	reads := 0
+	go func() {
+		for {
+			time.Sleep(5 * time.Second)
+			println("dc reads", reads)
+		}
+	}()
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 		wrapper.mu.Lock()
 		defer wrapper.mu.Unlock()
+		reads++
 		if _, err := wrapper.readBuf.Write(msg.Data); err != nil {
 			panic(err)
 		}
@@ -656,6 +695,47 @@ func pipeSCTPWithOpts(t *testing.T, piper piperFunc, onWriteOpen func(s *sctp.St
 
 func pipeSCTP(t *testing.T, piper piperFunc) (io.ReadCloser, io.WriteCloser, error) {
 	return pipeSCTPWithOpts(t, piper, nil)
+}
+
+func pipeDataChannel(t *testing.T, piper piperFunc) (io.ReadCloser, io.WriteCloser, error) {
+	var aa, ab *sctp.Association
+	aa, ab, err := association(t, piper)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	loggerFactory := logging.NewDefaultLoggerFactory()
+	cfg := &datachannel.Config{
+		ChannelType:          datachannel.ChannelTypeReliableUnordered, // todo(erd): configure
+		ReliabilityParameter: 0,                                        // todo(erd): configure
+		Label:                "data",
+		LoggerFactory:        loggerFactory,
+	}
+
+	dcWriter, err := datachannel.Dial(aa, 100, cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	dcReader, err := datachannel.Accept(ab, &datachannel.Config{
+		LoggerFactory: loggerFactory,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	// dcReader.OnOpen()
+
+	// go func() {
+	// 	var buf [8192]byte
+	// 	for {
+	// 		_, err := dcWriter.Read(buf[:])
+	// 		if err != nil {
+	// 			return
+	// 		}
+	// 	}
+	// }()
+
+	return dcReader, dcWriter, nil
 }
 
 func association(t *testing.T, piper piperFunc) (*sctp.Association, *sctp.Association, error) {

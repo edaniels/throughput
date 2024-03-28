@@ -16,15 +16,17 @@ import (
 type Stats struct {
 	bytesReadPerSecond float64
 	reads              uint64
+	readsRaw           uint64
 	writes             uint64
 	writesPerSecond    float64
 	percentageComplete float64
 }
 
 func (s Stats) String() string {
-	return fmt.Sprintf("stats: MiB/s=%f reads=%d writes=%d missing=%d writes/s=%f pct_done=%f%%",
+	return fmt.Sprintf("stats: MiB/s=%f reads=%d (%d) writes=%d missing=%d writes/s=%f pct_done=%f%%",
 		s.bytesReadPerSecond/1024.0/1024.0,
 		s.reads,
+		s.readsRaw,
 		s.writes,
 		s.writes-s.reads,
 		s.writesPerSecond,
@@ -62,7 +64,7 @@ func TestPacketThroughput(t *testing.T, makeReaderWriterPair func(t *testing.T) 
 			// spew.Dump(writer)
 
 			done := make(chan struct{})
-			var copied, totalReads, totalWrites int64
+			var copied, totalReads, totalReadsRaw, totalWrites int64
 			ticker := time.NewTicker(time.Second * 1)
 			started := time.Now()
 			var writesDone bool
@@ -73,6 +75,7 @@ func TestPacketThroughput(t *testing.T, makeReaderWriterPair func(t *testing.T) 
 					bytesReadPerSecond: float64(atomic.LoadInt64(&copied)) / time.Since(started).Seconds(),
 					percentageComplete: float64(atomic.LoadInt64(&copied)) / float64(waitForBytes) * 100.0,
 					reads:              uint64(atomic.LoadInt64(&totalReads)),
+					readsRaw:           uint64(atomic.LoadInt64(&totalReadsRaw)),
 					writes:             uint64(atomic.LoadInt64(&totalWrites)),
 				}
 				if writesDone {
@@ -96,8 +99,16 @@ func TestPacketThroughput(t *testing.T, makeReaderWriterPair func(t *testing.T) 
 					}
 				}
 			}()
+
+			data := make([]byte, size)
+			_, err = rand.Read(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+
 			go func() {
 				var buf [8192]byte
+				// time.Sleep(5 * time.Second)
 				for {
 					n, err := reader.Read(buf[:])
 					if err != nil {
@@ -108,6 +119,7 @@ func TestPacketThroughput(t *testing.T, makeReaderWriterPair func(t *testing.T) 
 						panic(err)
 					}
 					nowCopied := atomic.AddInt64(&copied, int64(n))
+					atomic.AddInt64(&totalReadsRaw, 1)
 					atomic.StoreInt64(&totalReads, copied/size)
 					if nowCopied == waitForBytes {
 						close(done)
@@ -116,14 +128,8 @@ func TestPacketThroughput(t *testing.T, makeReaderWriterPair func(t *testing.T) 
 				}
 			}()
 
-			bytes := make([]byte, size)
-			_, err = rand.Read(bytes)
-			if err != nil {
-				t.Fatal(err)
-			}
-
 			for i := 0; i < int(numWrites); i++ {
-				_, err := writer.Write(bytes)
+				_, err := writer.Write(data)
 				if err != nil {
 					t.Fatal(err)
 					break
