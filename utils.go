@@ -11,47 +11,55 @@ import (
 	"time"
 
 	"github.com/pion/sctp"
+	"github.com/pion/transport/v2"
 )
 
 type Stats struct {
 	bytesReadPerSecond float64
+	bytesRead          uint64
 	reads              uint64
 	readsRaw           uint64
 	writes             uint64
 	writesPerSecond    float64
 	percentageComplete float64
+	totalTime          time.Duration
 }
 
 func (s Stats) String() string {
-	return fmt.Sprintf("stats: MiB/s=%f reads=%d (%d) writes=%d missing=%d writes/s=%f pct_done=%f%%",
-		s.bytesReadPerSecond/1024.0/1024.0,
+	return fmt.Sprintf("stats: %fMb/s (%d Mb) reads=%d (%d) writes=%d missing=%d writes/s=%f pct_done=%f%% total_time=%s",
+		s.bytesReadPerSecond*8/1000/1000,
+		s.bytesRead*8/1000/1000,
 		s.reads,
 		s.readsRaw,
 		s.writes,
 		s.writes-s.reads,
 		s.writesPerSecond,
 		s.percentageComplete,
+		s.totalTime,
 	)
 }
 
 func TestPacketThroughput(t *testing.T, makeReaderWriterPair func(t *testing.T) (io.ReadCloser, io.WriteCloser, error)) {
 	sizes := []int64{
-		4,
-		16,
-		128,
-		256,
-		1024,
-		// 4096,
-		// 16384,
-		// 32768,
+		1,
+		10,
+		100,
+		1000,
 	}
 
-	numWrites := int64(1_000_000)
+	const maxThroughputBitsPerSecond = 10 * 1000 * 1000 // 10Mibs
+
+	totalBitsToSend := int64(600 * 1000 * 1000) // 600Mib for a 10Mib/s BW over 60 seconds
 
 	for _, size := range sizes {
 		t.Run(fmt.Sprintf("%d", size), func(t *testing.T) {
-			waitForBytes := size * numWrites
-			t.Log("Will send a total of", float64(waitForBytes)/1024/1024, "MiB", "or", waitForBytes, "bytes")
+			if (totalBitsToSend/8)%size != 0 {
+				t.Fatalf("totalBitsToSend in bytes %d must be evenly divisible by size %d", totalBitsToSend/8, size)
+			}
+
+			numWrites := totalBitsToSend / 8 / size
+			t.Log("Will send a total of", float64(totalBitsToSend)/1000/1000, "Mb")
+			waitForBytes := totalBitsToSend / 8
 
 			reader, writer, err := makeReaderWriterPair(t)
 			if err != nil {
@@ -64,7 +72,7 @@ func TestPacketThroughput(t *testing.T, makeReaderWriterPair func(t *testing.T) 
 			// spew.Dump(writer)
 
 			done := make(chan struct{})
-			var copied, totalReads, totalReadsRaw, totalWrites int64
+			var copied, bytesRead, totalReads, totalReadsRaw, totalWrites int64
 			ticker := time.NewTicker(time.Second * 1)
 			started := time.Now()
 			var writesDone bool
@@ -74,9 +82,11 @@ func TestPacketThroughput(t *testing.T, makeReaderWriterPair func(t *testing.T) 
 				s := Stats{
 					bytesReadPerSecond: float64(atomic.LoadInt64(&copied)) / time.Since(started).Seconds(),
 					percentageComplete: float64(atomic.LoadInt64(&copied)) / float64(waitForBytes) * 100.0,
+					bytesRead:          uint64(bytesRead),
 					reads:              uint64(atomic.LoadInt64(&totalReads)),
 					readsRaw:           uint64(atomic.LoadInt64(&totalReadsRaw)),
 					writes:             uint64(atomic.LoadInt64(&totalWrites)),
+					totalTime:          time.Since(started),
 				}
 				if writesDone {
 					s.writesPerSecond = float64(atomic.LoadInt64(&totalWrites)) / writesFinishedAt.Sub(started).Seconds()
@@ -85,9 +95,6 @@ func TestPacketThroughput(t *testing.T, makeReaderWriterPair func(t *testing.T) 
 				}
 				return s
 			}
-
-			// var waitWriteMu sync.Mutex
-			// waitWrite := sync.NewCond(&waitWriteMu)
 
 			go func() {
 				for {
@@ -108,7 +115,6 @@ func TestPacketThroughput(t *testing.T, makeReaderWriterPair func(t *testing.T) 
 
 			go func() {
 				var buf [8192]byte
-				// time.Sleep(5 * time.Second)
 				for {
 					n, err := reader.Read(buf[:])
 					if err != nil {
@@ -119,6 +125,7 @@ func TestPacketThroughput(t *testing.T, makeReaderWriterPair func(t *testing.T) 
 						panic(err)
 					}
 					nowCopied := atomic.AddInt64(&copied, int64(n))
+					atomic.AddInt64(&bytesRead, int64(n))
 					atomic.AddInt64(&totalReadsRaw, 1)
 					atomic.StoreInt64(&totalReads, copied/size)
 					if nowCopied == waitForBytes {
@@ -128,7 +135,14 @@ func TestPacketThroughput(t *testing.T, makeReaderWriterPair func(t *testing.T) 
 				}
 			}()
 
+			// pacer so we don't overflow buffers
+			maxWritesPerSecond := maxThroughputBitsPerSecond / (len(data) * 8)
+			writeDur := time.Second / time.Duration(maxWritesPerSecond)
+			t.Log("max writes per second", maxWritesPerSecond, "wait", writeDur, "per sec", len(data)*maxWritesPerSecond)
+			writeTicker := time.NewTicker(writeDur)
+			defer writeTicker.Stop()
 			for i := 0; i < int(numWrites); i++ {
+				<-writeTicker.C
 				_, err := writer.Write(data)
 				if err != nil {
 					t.Fatal(err)
@@ -147,7 +161,7 @@ func TestPacketThroughput(t *testing.T, makeReaderWriterPair func(t *testing.T) 
 }
 
 type PairedUDPWriter struct {
-	Conn   *net.UDPConn
+	Conn   transport.UDPConn
 	ToAddr net.Addr
 }
 

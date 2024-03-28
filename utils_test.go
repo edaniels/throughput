@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -21,6 +22,19 @@ import (
 	"github.com/pion/webrtc/v3"
 )
 
+const (
+	serverPort = 1234
+	clientPort = 1235
+
+	serverAddr = "127.0.0.1:1234"
+	clientAddr = "127.0.0.1:1235"
+)
+
+var (
+	serverUDPAddr = &net.UDPAddr{Port: 1234}
+	clientUDPAddr = &net.UDPAddr{Port: 1235}
+)
+
 // // all 250k w/s
 //
 //	sizes := []int64{
@@ -34,12 +48,12 @@ import (
 // This is all OS net stack impl dependent
 func TestThroughputUDP(t *testing.T) {
 	TestPacketThroughput(t, func(t *testing.T) (io.ReadCloser, io.WriteCloser, error) {
-		server, err := net.ListenUDP("udp4", nil)
+		server, err := net.ListenUDP("udp4", serverUDPAddr)
 		if err != nil {
 			return nil, nil, err
 		}
 
-		client, err := net.ListenUDP("udp4", nil)
+		client, err := net.ListenUDP("udp4", clientUDPAddr)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -53,7 +67,7 @@ func TestThroughputUDP(t *testing.T) {
 // This is all OS net stack impl dependent
 func TestThroughputTCP(t *testing.T) {
 	TestPacketThroughput(t, func(t *testing.T) (io.ReadCloser, io.WriteCloser, error) {
-		server, err := net.Listen("tcp", "0.0.0.0:0")
+		server, err := net.Listen("tcp", serverAddr)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -66,6 +80,8 @@ func TestThroughputTCP(t *testing.T) {
 			}
 			serverConn <- conn
 		}()
+
+		fmt.Println(server.Addr().(*net.TCPAddr))
 
 		client, err := net.Dial(server.Addr().Network(), server.Addr().String())
 		if err != nil {
@@ -616,7 +632,7 @@ func pipeICE(t *testing.T) (net.Conn, net.Conn, error) {
 }
 
 func acceptDumbConn() (*dumbConn, error) {
-	pConn, err := net.ListenUDP("udp4", nil)
+	pConn, err := net.ListenUDP("udp4", serverUDPAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -631,7 +647,7 @@ func pipeUDP(t *testing.T) (net.Conn, net.Conn, error) {
 		return nil, nil, err
 	}
 
-	bConn, err := net.DialUDP("udp4", nil, aConn.LocalAddr().(*net.UDPAddr))
+	bConn, err := net.DialUDP("udp4", clientUDPAddr, aConn.LocalAddr().(*net.UDPAddr))
 	if err != nil {
 		return nil, nil, err
 	}
